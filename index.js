@@ -237,7 +237,26 @@ app.get("/api/menu", async (req, res) => {
   }
 });
 
-// GET /api/menu/:id — public, single item
+// GET /api/menu/all — protected, ALL items including unavailable (for dashboard)
+app.get(
+  "/api/menu/all",
+  requireAuth,
+  requireRole("admin", "manager"),
+  async (req, res) => {
+    try {
+      const items = await db
+        .collection("menu_items")
+        .find({})
+        .sort({ category: 1, name: 1 })
+        .toArray();
+      res.json({ data: items });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch menu items" });
+    }
+  }
+);
+
+// GET /api/menu/:id — public, single item (MUST be after /all)
 app.get("/api/menu/:id", async (req, res) => {
   try {
     const item = await db
@@ -251,6 +270,131 @@ app.get("/api/menu/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch menu item" });
   }
 });
+
+// POST /api/menu — create menu item (manager/admin)
+app.post(
+  "/api/menu",
+  requireAuth,
+  requireRole("admin", "manager"),
+  async (req, res) => {
+    try {
+      const { name, price, category, description, imageUrl } = req.body;
+
+      if (!name || price == null || !category) {
+        return res
+          .status(400)
+          .json({ error: "name, price, and category are required" });
+      }
+
+      if (typeof price !== "number" || price < 0) {
+        return res
+          .status(400)
+          .json({ error: "price must be a non-negative number" });
+      }
+
+      const doc = {
+        name: name.trim(),
+        price,
+        category: category.trim(),
+        description: description?.trim() || "",
+        imageUrl: imageUrl?.trim() || "",
+        available: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      const result = await db.collection("menu_items").insertOne(doc);
+      res.status(201).json({ data: { ...doc, _id: result.insertedId } });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to create menu item" });
+    }
+  }
+);
+
+// PATCH /api/menu/:id — update menu item (manager/admin)
+app.patch(
+  "/api/menu/:id",
+  requireAuth,
+  requireRole("admin", "manager"),
+  async (req, res) => {
+    try {
+      const updates = {};
+      const allowed = [
+        "name",
+        "price",
+        "category",
+        "description",
+        "imageUrl",
+        "available",
+      ];
+
+      for (const key of allowed) {
+        if (req.body[key] !== undefined) {
+          updates[key] = req.body[key];
+        }
+      }
+
+      if (updates.name) updates.name = updates.name.trim();
+      if (updates.category) updates.category = updates.category.trim();
+      if (updates.description)
+        updates.description = updates.description.trim();
+      if (updates.imageUrl) updates.imageUrl = updates.imageUrl.trim();
+
+      if (
+        updates.price !== undefined &&
+        (typeof updates.price !== "number" || updates.price < 0)
+      ) {
+        return res
+          .status(400)
+          .json({ error: "price must be a non-negative number" });
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid fields to update" });
+      }
+
+      updates.updatedAt = new Date();
+
+      const result = await db
+        .collection("menu_items")
+        .findOneAndUpdate(
+          { _id: new ObjectId(req.params.id) },
+          { $set: updates },
+          { returnDocument: "after" }
+        );
+
+      if (!result) {
+        return res.status(404).json({ error: "Menu item not found" });
+      }
+
+      res.json({ data: result });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update menu item" });
+    }
+  }
+);
+
+// DELETE /api/menu/:id — delete menu item (manager/admin)
+app.delete(
+  "/api/menu/:id",
+  requireAuth,
+  requireRole("admin", "manager"),
+  async (req, res) => {
+    try {
+      const result = await db
+        .collection("menu_items")
+        .deleteOne({ _id: new ObjectId(req.params.id) });
+
+      if (result.deletedCount === 0) {
+        return res.status(404).json({ error: "Menu item not found" });
+      }
+
+      res.json({ data: { deleted: true } });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to delete menu item" });
+    }
+  }
+);
 
 // --- Seed Admin ---
 
