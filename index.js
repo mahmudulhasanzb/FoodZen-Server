@@ -395,6 +395,130 @@ app.delete(
     }
   }
 );
+// --- Tables API ---
+
+const VALID_TABLE_STATUSES = ["available", "occupied", "reserved"];
+
+// GET /api/tables — all tables (protected, any staff)
+app.get("/api/tables", requireAuth, async (req, res) => {
+  try {
+    const tables = await db
+      .collection("tables")
+      .find({})
+      .sort({ number: 1 })
+      .toArray();
+    res.json({ data: tables });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch tables" });
+  }
+});
+
+// POST /api/tables — create table (admin/manager)
+app.post(
+  "/api/tables",
+  requireAuth,
+  requireRole("admin", "manager"),
+  async (req, res) => {
+    try {
+      const { number, capacity, zone } = req.body;
+
+      if (number == null || capacity == null) {
+        return res
+          .status(400)
+          .json({ error: "number and capacity are required" });
+      }
+
+      if (typeof number !== "number" || number < 1) {
+        return res
+          .status(400)
+          .json({ error: "number must be a positive integer" });
+      }
+
+      if (typeof capacity !== "number" || capacity < 1) {
+        return res
+          .status(400)
+          .json({ error: "capacity must be a positive integer" });
+      }
+
+      // Check duplicate table number
+      const existing = await db
+        .collection("tables")
+        .findOne({ number });
+      if (existing) {
+        return res
+          .status(409)
+          .json({ error: `Table ${number} already exists` });
+      }
+
+      const doc = {
+        number,
+        capacity,
+        status: "available",
+        zone: zone?.trim() || "",
+        createdAt: new Date(),
+      };
+
+      const result = await db.collection("tables").insertOne(doc);
+      res.status(201).json({ data: { ...doc, _id: result.insertedId } });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to create table" });
+    }
+  }
+);
+
+// PATCH /api/tables/:id — update table (server+)
+app.patch(
+  "/api/tables/:id",
+  requireAuth,
+  requireRole("admin", "manager", "server"),
+  async (req, res) => {
+    try {
+      const updates = {};
+
+      if (req.body.status !== undefined) {
+        if (!VALID_TABLE_STATUSES.includes(req.body.status)) {
+          return res.status(400).json({
+            error: `Invalid status. Must be: ${VALID_TABLE_STATUSES.join(", ")}`,
+          });
+        }
+        updates.status = req.body.status;
+      }
+
+      if (req.body.capacity !== undefined) {
+        if (typeof req.body.capacity !== "number" || req.body.capacity < 1) {
+          return res
+            .status(400)
+            .json({ error: "capacity must be a positive integer" });
+        }
+        updates.capacity = req.body.capacity;
+      }
+
+      if (req.body.zone !== undefined) {
+        updates.zone = req.body.zone.trim();
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid fields to update" });
+      }
+
+      const result = await db
+        .collection("tables")
+        .findOneAndUpdate(
+          { _id: new ObjectId(req.params.id) },
+          { $set: updates },
+          { returnDocument: "after" }
+        );
+
+      if (!result) {
+        return res.status(404).json({ error: "Table not found" });
+      }
+
+      res.json({ data: result });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update table" });
+    }
+  }
+);
 
 // --- Seed Admin ---
 
