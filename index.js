@@ -410,12 +410,43 @@ async function seedAdmin() {
   }
 }
 
+// --- Seed Menu ---
+
+async function seedMenu() {
+  const count = await db.collection("menu_items").countDocuments();
+  if (count > 0) return;
+
+  const now = new Date();
+  const items = [
+    { name: "Bruschetta", price: 8.5, category: "Starters", description: "Toasted bread with tomato, basil, and olive oil" },
+    { name: "Caesar Salad", price: 10.0, category: "Starters", description: "Romaine, croutons, parmesan, house dressing" },
+    { name: "Garlic Bread", price: 5.5, category: "Starters", description: "Warm bread with garlic butter and herbs" },
+    { name: "Grilled Salmon", price: 22.0, category: "Mains", description: "Atlantic salmon with lemon herb sauce" },
+    { name: "Beef Burger", price: 16.5, category: "Mains", description: "Angus patty with cheddar, lettuce, tomato" },
+    { name: "Margherita Pizza", price: 14.0, category: "Mains", description: "Classic tomato, mozzarella, fresh basil" },
+    { name: "Pasta Carbonara", price: 15.0, category: "Mains", description: "Spaghetti with pancetta, egg, parmesan" },
+    { name: "Tiramisu", price: 9.0, category: "Desserts", description: "Espresso-soaked ladyfingers with mascarpone" },
+    { name: "Lemon Tart", price: 8.0, category: "Desserts", description: "Tangy lemon curd in buttery pastry shell" },
+    { name: "Sparkling Water", price: 3.0, category: "Drinks", description: "750ml bottle" },
+  ].map((item) => ({
+    ...item,
+    imageUrl: "",
+    available: true,
+    createdAt: now,
+    updatedAt: now,
+  }));
+
+  await db.collection("menu_items").insertMany(items);
+  console.log(`Seeded ${items.length} menu items`);
+}
+
 // --- Start ---
 
 async function start() {
   try {
     await connectDB();
     await seedAdmin();
+    await seedMenu();
     app.listen(PORT, () => {
       console.log(`FoodZen API running on http://localhost:${PORT}`);
     });
