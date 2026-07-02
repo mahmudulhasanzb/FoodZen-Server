@@ -563,6 +563,31 @@ async function seedMenu() {
   await db.collection("menu_items").insertMany(items);
   console.log(`Seeded ${items.length} menu items`);
 }
+// --- Seed Tables ---
+
+async function seedTables() {
+  const count = await db.collection("tables").countDocuments();
+  if (count > 0) return;
+
+  const now = new Date();
+  const tables = [
+    { number: 1, capacity: 2, zone: "main" },
+    { number: 2, capacity: 2, zone: "main" },
+    { number: 3, capacity: 4, zone: "main" },
+    { number: 4, capacity: 4, zone: "main" },
+    { number: 5, capacity: 6, zone: "main" },
+    { number: 6, capacity: 4, zone: "patio" },
+    { number: 7, capacity: 6, zone: "patio" },
+    { number: 8, capacity: 2, zone: "bar" },
+  ].map((t) => ({
+    ...t,
+    status: "available",
+    createdAt: now,
+  }));
+
+  await db.collection("tables").insertMany(tables);
+  console.log(`Seeded ${tables.length} tables`);
+}
 
 // --- Start ---
 
@@ -571,6 +596,7 @@ async function start() {
     await connectDB();
     await seedAdmin();
     await seedMenu();
+    await seedTables();
     app.listen(PORT, () => {
       console.log(`FoodZen API running on http://localhost:${PORT}`);
     });
