@@ -564,6 +564,218 @@ app.patch(
   }
 );
 
+// --- Orders API ---
+
+const VALID_ORDER_STATUSES = [
+  "pending",
+  "preparing",
+  "ready",
+  "served",
+  "closed",
+  "cancelled",
+];
+
+// GET /api/orders — list all orders (protected, any staff)
+app.get("/api/orders", requireAuth, async (req, res) => {
+  try {
+    const filter = {};
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+    const orders = await db
+      .collection("orders")
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.json({ data: orders });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch orders" });
+  }
+});
+
+// GET /api/orders/:id — public, single order for tracking
+app.get("/api/orders/:id", async (req, res) => {
+  try {
+    const order = await db
+      .collection("orders")
+      .findOne({ _id: new ObjectId(req.params.id) });
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    res.json({ data: order });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch order" });
+  }
+});
+
+// POST /api/orders — create order (protected, server+)
+app.post(
+  "/api/orders",
+  requireAuth,
+  requireRole("admin", "manager", "server"),
+  async (req, res) => {
+    try {
+      const { tableId, items, notes } = req.body;
+
+      if (!tableId || !items || !Array.isArray(items) || items.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "tableId and non-empty items array are required" });
+      }
+
+      // Check if table exists
+      const table = await db
+        .collection("tables")
+        .findOne({ _id: new ObjectId(tableId) });
+      if (!table) {
+        return res.status(404).json({ error: "Table not found" });
+      }
+
+      // Validate and format items
+      const formattedItems = [];
+      for (const item of items) {
+        if (!item.menuItemId || !item.name || item.price == null || !item.qty) {
+          return res.status(400).json({
+            error: "Each item must have menuItemId, name, price, and qty",
+          });
+        }
+        formattedItems.push({
+          menuItemId: item.menuItemId,
+          name: item.name,
+          price: Number(item.price),
+          qty: Number(item.qty),
+        });
+      }
+
+      const doc = {
+        tableId: new ObjectId(tableId),
+        tableNumber: table.number,
+        items: formattedItems,
+        status: "pending",
+        staffId: req.staff._id,
+        notes: notes?.trim() || "",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      const result = await db.collection("orders").insertOne(doc);
+
+      // T-028: Set table status to occupied
+      await db
+        .collection("tables")
+        .updateOne(
+          { _id: new ObjectId(tableId) },
+          { $set: { status: "occupied" } }
+        );
+
+      res.status(201).json({ data: { ...doc, _id: result.insertedId } });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to create order" });
+    }
+  }
+);
+
+// PATCH /api/orders/:id — update order status or details (protected, server/kitchen)
+app.patch(
+  "/api/orders/:id",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const { status, items, notes } = req.body;
+      const orderId = req.params.id;
+
+      const order = await db
+        .collection("orders")
+        .findOne({ _id: new ObjectId(orderId) });
+
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      const updates = {};
+
+      // If updating status
+      if (status !== undefined) {
+        if (!VALID_ORDER_STATUSES.includes(status)) {
+          return res.status(400).json({
+            error: `Invalid status. Must be: ${VALID_ORDER_STATUSES.join(", ")}`,
+          });
+        }
+        updates.status = status;
+      }
+
+      // If updating items/notes, order must be pending
+      if (items !== undefined || notes !== undefined) {
+        if (order.status !== "pending") {
+          return res.status(400).json({
+            error: "Can only update order details while status is pending",
+          });
+        }
+
+        if (items !== undefined) {
+          if (!Array.isArray(items) || items.length === 0) {
+            return res
+              .status(400)
+              .json({ error: "items must be a non-empty array" });
+          }
+          const formattedItems = [];
+          for (const item of items) {
+            if (
+              !item.menuItemId ||
+              !item.name ||
+              item.price == null ||
+              !item.qty
+            ) {
+              return res.status(400).json({
+                error: "Each item must have menuItemId, name, price, and qty",
+              });
+            }
+            formattedItems.push({
+              menuItemId: item.menuItemId,
+              name: item.name,
+              price: Number(item.price),
+              qty: Number(item.qty),
+            });
+          }
+          updates.items = formattedItems;
+        }
+
+        if (notes !== undefined) {
+          updates.notes = notes.trim();
+        }
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid fields to update" });
+      }
+
+      updates.updatedAt = new Date();
+
+      const result = await db
+        .collection("orders")
+        .findOneAndUpdate(
+          { _id: new ObjectId(orderId) },
+          { $set: updates },
+          { returnDocument: "after" }
+        );
+
+      // If status updated to cancelled, free the table
+      if (status === "cancelled") {
+        await db
+          .collection("tables")
+          .updateOne(
+            { _id: new ObjectId(order.tableId) },
+            { $set: { status: "available" } }
+          );
+      }
+
+      res.json({ data: result });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update order" });
+    }
+  }
+);
+
 // --- Seed Admin ---
 
 async function seedAdmin() {
