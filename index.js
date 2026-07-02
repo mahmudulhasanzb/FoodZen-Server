@@ -122,6 +122,50 @@ app.get("/api/staff/me", requireAuth, async (req, res) => {
   res.json({ data: req.staff });
 });
 
+// POST /api/staff/register-public — create staff record for newly signed-up user (public)
+app.post("/api/staff/register-public", async (req, res) => {
+  try {
+    const { userId, name, role } = req.body;
+
+    if (!userId || !name || !role) {
+      return res
+        .status(400)
+        .json({ error: "userId, name, and role are required" });
+    }
+
+    if (!VALID_ROLES.includes(role)) {
+      return res.status(400).json({
+        error: `Invalid role. Must be one of: ${VALID_ROLES.join(", ")}`,
+      });
+    }
+
+    // Check duplicate
+    const existing = await db
+      .collection("staff")
+      .findOne({ userId });
+    if (existing) {
+      return res
+        .status(409)
+        .json({ error: "Staff record already exists for this user" });
+    }
+
+    const doc = {
+      userId,
+      name,
+      role,
+      active: true,
+      createdAt: new Date(),
+    };
+
+    const result = await db.collection("staff").insertOne(doc);
+    res
+      .status(201)
+      .json({ data: { ...doc, _id: result.insertedId } });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create public staff record" });
+  }
+});
+
 // POST /api/staff — create staff record (admin only)
 app.post(
   "/api/staff",
