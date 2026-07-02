@@ -217,6 +217,41 @@ app.patch(
   }
 );
 
+// --- Menu API ---
+
+// GET /api/menu — public, available items only
+app.get("/api/menu", async (req, res) => {
+  try {
+    const filter = { available: { $ne: false } };
+    if (req.query.category) {
+      filter.category = req.query.category;
+    }
+    const items = await db
+      .collection("menu_items")
+      .find(filter)
+      .sort({ category: 1, name: 1 })
+      .toArray();
+    res.json({ data: items });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch menu" });
+  }
+});
+
+// GET /api/menu/:id — public, single item
+app.get("/api/menu/:id", async (req, res) => {
+  try {
+    const item = await db
+      .collection("menu_items")
+      .findOne({ _id: new ObjectId(req.params.id) });
+    if (!item) {
+      return res.status(404).json({ error: "Menu item not found" });
+    }
+    res.json({ data: item });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch menu item" });
+  }
+});
+
 // --- Seed Admin ---
 
 async function seedAdmin() {
