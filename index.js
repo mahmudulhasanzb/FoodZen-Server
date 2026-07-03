@@ -776,6 +776,219 @@ app.patch(
   }
 );
 
+// --- Bills API ---
+
+// GET /api/bills — list all bills (protected, admin/manager/server)
+app.get(
+  "/api/bills",
+  requireAuth,
+  requireRole("admin", "manager", "server"),
+  async (req, res) => {
+    try {
+      const filter = {};
+      if (req.query.status) {
+        filter.status = req.query.status;
+      }
+      
+      const bills = await db
+        .collection("bills")
+        .aggregate([
+          { $match: filter },
+          {
+            $lookup: {
+              from: "orders",
+              localField: "orderId",
+              foreignField: "_id",
+              as: "order",
+            },
+          },
+          { $unwind: "$order" },
+          { $sort: { createdAt: -1 } },
+        ])
+        .toArray();
+
+      res.json({ data: bills });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch bills" });
+    }
+  }
+);
+
+// POST /api/bills — create bill from orderId (protected, admin/manager/server)
+app.post(
+  "/api/bills",
+  requireAuth,
+  requireRole("admin", "manager", "server"),
+  async (req, res) => {
+    try {
+      const { orderId } = req.body;
+
+      if (!orderId) {
+        return res.status(400).json({ error: "orderId is required" });
+      }
+
+      // Check if bill already exists for this order
+      const existingBill = await db
+        .collection("bills")
+        .findOne({ orderId: new ObjectId(orderId) });
+      if (existingBill) {
+        return res
+          .status(409)
+          .json({ error: "Bill already exists for this order" });
+      }
+
+      // Find the order
+      const order = await db
+        .collection("orders")
+        .findOne({ _id: new ObjectId(orderId) });
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      // Ensure order status is served
+      if (order.status !== "served") {
+        return res
+          .status(400)
+          .json({ error: "Can only create bills for served orders" });
+      }
+
+      // Calculate subtotal
+      const subtotal = order.items.reduce(
+        (sum, item) => sum + item.price * item.qty,
+        0
+      );
+
+      // Tax rate
+      const taxRate = Number(process.env.TAX_RATE || 0.08);
+      const tax = Number((subtotal * taxRate).toFixed(2));
+      const total = Number((subtotal + tax).toFixed(2));
+
+      const doc = {
+        orderId: new ObjectId(orderId),
+        subtotal,
+        tax,
+        tip: 0,
+        total,
+        paymentMethod: null,
+        status: "open",
+        staffId: req.staff._id,
+        createdAt: new Date(),
+      };
+
+      const result = await db.collection("bills").insertOne(doc);
+      res.status(201).json({ data: { ...doc, _id: result.insertedId } });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to create bill" });
+    }
+  }
+);
+
+// PATCH /api/bills/:id — update tip, paymentMethod, mark paid (protected, admin/manager/server)
+app.patch(
+  "/api/bills/:id",
+  requireAuth,
+  requireRole("admin", "manager", "server"),
+  async (req, res) => {
+    try {
+      const { tip, paymentMethod, status } = req.body;
+      const billId = req.params.id;
+
+      // Find the bill
+      const bill = await db
+        .collection("bills")
+        .findOne({ _id: new ObjectId(billId) });
+
+      if (!bill) {
+        return res.status(404).json({ error: "Bill not found" });
+      }
+
+      if (bill.status === "paid") {
+        return res.status(400).json({ error: "Bill is already paid" });
+      }
+
+      const updates = {};
+      
+      if (tip !== undefined) {
+        if (typeof tip !== "number" || tip < 0) {
+          return res.status(400).json({ error: "Tip must be a non-negative number" });
+        }
+        updates.tip = tip;
+      }
+
+      if (paymentMethod !== undefined) {
+        const VALID_PAYMENT_METHODS = ["cash", "card", "other"];
+        if (!VALID_PAYMENT_METHODS.includes(paymentMethod)) {
+          return res.status(400).json({
+            error: `Invalid paymentMethod. Must be: ${VALID_PAYMENT_METHODS.join(", ")}`,
+          });
+        }
+        updates.paymentMethod = paymentMethod;
+      }
+
+      if (status !== undefined) {
+        if (status !== "paid") {
+          return res.status(400).json({ error: "Can only update status to paid" });
+        }
+        updates.status = "paid";
+        updates.paidAt = new Date();
+      }
+
+      // Recalculate total if tip changes
+      const currentTip = tip !== undefined ? tip : bill.tip;
+      updates.total = Number((bill.subtotal + bill.tax + currentTip).toFixed(2));
+
+      // If status is updating to paid, paymentMethod is required
+      if (updates.status === "paid") {
+        const finalPaymentMethod = paymentMethod !== undefined ? paymentMethod : bill.paymentMethod;
+        if (!finalPaymentMethod) {
+          return res.status(400).json({
+            error: "paymentMethod is required to mark bill as paid",
+          });
+        }
+      }
+
+      // Update the bill
+      const updatedBill = await db
+        .collection("bills")
+        .findOneAndUpdate(
+          { _id: new ObjectId(billId) },
+          { $set: updates },
+          { returnDocument: "after" }
+        );
+
+      // If paid, sequentially update order and table
+      if (updates.status === "paid") {
+        const order = await db
+          .collection("orders")
+          .findOne({ _id: new ObjectId(bill.orderId) });
+
+        if (order) {
+          // 1. Set order status to closed
+          await db
+            .collection("orders")
+            .updateOne(
+              { _id: new ObjectId(bill.orderId) },
+              { $set: { status: "closed", updatedAt: new Date() } }
+            );
+
+          // 2. Set table status to available
+          await db
+            .collection("tables")
+            .updateOne(
+              { _id: new ObjectId(order.tableId) },
+              { $set: { status: "available" } }
+            );
+        }
+      }
+
+      res.json({ data: updatedBill });
+    } catch (err) {
+      console.error("Failed to update bill:", err);
+      res.status(500).json({ error: "Failed to update bill" });
+    }
+  }
+);
+
 // --- Seed Admin ---
 
 async function seedAdmin() {
