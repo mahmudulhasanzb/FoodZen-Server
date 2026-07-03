@@ -989,6 +989,218 @@ app.patch(
   }
 );
 
+// --- Reservations API ---
+
+// POST /api/reservations — create pending reservation (public)
+app.post("/api/reservations", async (req, res) => {
+  try {
+    const { customerName, phone, email, partySize, date, time, notes } = req.body;
+
+    if (!customerName || !phone || !partySize || !date || !time) {
+      return res.status(400).json({
+        error: "customerName, phone, partySize, date, and time are required",
+      });
+    }
+
+    if (typeof partySize !== "number" || partySize < 1) {
+      return res.status(400).json({ error: "partySize must be a positive integer" });
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
+    }
+
+    if (!/^\d{2}:\d{2}$/.test(time)) {
+      return res.status(400).json({ error: "time must be in HH:mm format" });
+    }
+
+    const doc = {
+      customerName: customerName.trim(),
+      phone: phone.trim(),
+      email: email?.trim() || "",
+      partySize: Number(partySize),
+      date,
+      time,
+      tableId: null,
+      status: "pending",
+      notes: notes?.trim() || "",
+      createdAt: new Date(),
+    };
+
+    const result = await db.collection("reservations").insertOne(doc);
+    res.status(201).json({ data: { ...doc, _id: result.insertedId } });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create reservation" });
+  }
+});
+
+// GET /api/reservations — list reservations (protected, admin/manager/server)
+app.get(
+  "/api/reservations",
+  requireAuth,
+  requireRole("admin", "manager", "server"),
+  async (req, res) => {
+    try {
+      const filter = {};
+      if (req.query.date) {
+        filter.date = req.query.date;
+      }
+
+      const list = await db
+        .collection("reservations")
+        .aggregate([
+          { $match: filter },
+          {
+            $lookup: {
+              from: "tables",
+              localField: "tableId",
+              foreignField: "_id",
+              as: "table",
+            },
+          },
+          {
+            $unwind: {
+              path: "$table",
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+          { $sort: { time: 1 } },
+        ])
+        .toArray();
+
+      res.json({ data: list });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch reservations" });
+    }
+  }
+);
+
+// PATCH /api/reservations/:id — confirm, seat, or cancel reservation (protected, admin/manager/server)
+app.patch(
+  "/api/reservations/:id",
+  requireAuth,
+  requireRole("admin", "manager", "server"),
+  async (req, res) => {
+    try {
+      const { status, tableId } = req.body;
+      const reservationId = req.params.id;
+
+      const reservation = await db
+        .collection("reservations")
+        .findOne({ _id: new ObjectId(reservationId) });
+
+      if (!reservation) {
+        return res.status(404).json({ error: "Reservation not found" });
+      }
+
+      const updates = {};
+      
+      if (status !== undefined) {
+        const VALID_RESERVATION_STATUSES = ["pending", "confirmed", "seated", "cancelled"];
+        if (!VALID_RESERVATION_STATUSES.includes(status)) {
+          return res.status(400).json({
+            error: `Invalid status. Must be: ${VALID_RESERVATION_STATUSES.join(", ")}`,
+          });
+        }
+      }
+
+      // 1. Confirm & Assign Table
+      if (status === "confirmed") {
+        const targetTableId = tableId || reservation.tableId;
+        if (!targetTableId) {
+          return res.status(400).json({ error: "tableId is required to confirm reservation" });
+        }
+
+        const table = await db
+          .collection("tables")
+          .findOne({ _id: new ObjectId(targetTableId) });
+
+        if (!table) {
+          return res.status(404).json({ error: "Assigned table not found" });
+        }
+
+        if (table.capacity < reservation.partySize) {
+          return res.status(400).json({
+            error: `Table capacity (${table.capacity}) is less than party size (${reservation.partySize})`,
+          });
+        }
+
+        // If table changed, release old table
+        if (reservation.tableId && String(reservation.tableId) !== String(targetTableId)) {
+          await db
+            .collection("tables")
+            .updateOne(
+              { _id: new ObjectId(reservation.tableId) },
+              { $set: { status: "available" } }
+            );
+        }
+
+        // Reserve the new table
+        await db
+          .collection("tables")
+          .updateOne(
+            { _id: new ObjectId(targetTableId) },
+            { $set: { status: "reserved" } }
+          );
+
+        updates.tableId = new ObjectId(targetTableId);
+        updates.status = "confirmed";
+      }
+
+      // 2. Seat Reservation
+      if (status === "seated") {
+        const finalTableId = reservation.tableId;
+        if (!finalTableId) {
+          return res.status(400).json({ error: "Cannot seat guest without assigned table. Confirm first." });
+        }
+
+        // Update reservation to seated
+        updates.status = "seated";
+
+        // Update table to occupied
+        await db
+          .collection("tables")
+          .updateOne(
+            { _id: new ObjectId(finalTableId) },
+            { $set: { status: "occupied" } }
+          );
+      }
+
+      // 3. Cancel Reservation
+      if (status === "cancelled") {
+        updates.status = "cancelled";
+
+        // Release table if one was assigned
+        if (reservation.tableId) {
+          await db
+            .collection("tables")
+            .updateOne(
+              { _id: new ObjectId(reservation.tableId) },
+              { $set: { status: "available" } }
+            );
+        }
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid fields to update" });
+      }
+
+      const result = await db
+        .collection("reservations")
+        .findOneAndUpdate(
+          { _id: new ObjectId(reservationId) },
+          { $set: updates },
+          { returnDocument: "after" }
+        );
+
+      res.json({ data: result });
+    } catch (err) {
+      console.error("Failed to update reservation:", err);
+      res.status(500).json({ error: "Failed to update reservation" });
+    }
+  }
+);
+
 // --- Seed Admin ---
 
 async function seedAdmin() {
