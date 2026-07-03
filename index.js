@@ -175,10 +175,10 @@ app.post(
     try {
       const { userId, name, role } = req.body;
 
-      if (!userId || !name || !role) {
+      if (!name || !role) {
         return res
           .status(400)
-          .json({ error: "userId, name, and role are required" });
+          .json({ error: "name and role are required" });
       }
 
       if (!VALID_ROLES.includes(role)) {
@@ -187,10 +187,49 @@ app.post(
         });
       }
 
-      // Check duplicate
+      let finalUserId = userId;
+
+      // If userId is not provided, register via Better Auth using email and password
+      if (!finalUserId) {
+        const { email, password } = req.body;
+        if (!email || !password) {
+          return res.status(400).json({
+            error: "Either userId, or email and password must be provided",
+          });
+        }
+
+        const signupRes = await fetch(
+          `${BETTER_AUTH_URL}/api/auth/sign-up/email`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ email, password, name }),
+          }
+        );
+
+        const signupData = await signupRes.json();
+        
+        if (!signupRes.ok) {
+          return res.status(signupRes.status).json({
+            error: signupData.error?.message || signupData.error || "Failed to register user in Auth",
+          });
+        }
+
+        if (!signupData?.user?.id) {
+          return res.status(500).json({
+            error: "Auth sign up succeeded but user ID is missing",
+          });
+        }
+
+        finalUserId = signupData.user.id;
+      }
+
+      // Check duplicate staff record
       const existing = await db
         .collection("staff")
-        .findOne({ userId });
+        .findOne({ userId: finalUserId });
       if (existing) {
         return res
           .status(409)
@@ -198,7 +237,7 @@ app.post(
       }
 
       const doc = {
-        userId,
+        userId: finalUserId,
         name,
         role,
         active: true,
@@ -210,6 +249,7 @@ app.post(
         .status(201)
         .json({ data: { ...doc, _id: result.insertedId } });
     } catch (err) {
+      console.error("Failed to create staff:", err);
       res.status(500).json({ error: "Failed to create staff" });
     }
   }
@@ -1197,6 +1237,103 @@ app.patch(
     } catch (err) {
       console.error("Failed to update reservation:", err);
       res.status(500).json({ error: "Failed to update reservation" });
+    }
+  }
+);
+
+// --- Reports API ---
+
+// GET /api/reports/summary — daily totals (protected, admin/manager/server)
+app.get(
+  "/api/reports/summary",
+  requireAuth,
+  requireRole("admin", "manager", "server"),
+  async (req, res) => {
+    try {
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      const end = new Date();
+      end.setHours(23, 59, 59, 999);
+
+      // 1. Orders count today
+      const ordersToday = await db
+        .collection("orders")
+        .countDocuments({
+          createdAt: { $gte: start, $lte: end },
+        });
+
+      // 2. Revenue today (paid bills total) - admin & manager only
+      let revenueToday = 0;
+      const isManagerOrAdmin = req.staff.role === "admin" || req.staff.role === "manager";
+      
+      if (isManagerOrAdmin) {
+        const revenueResult = await db
+          .collection("bills")
+          .aggregate([
+            {
+              $match: {
+                status: "paid",
+                paidAt: { $gte: start, $lte: end },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: "$total" },
+              },
+            },
+          ])
+          .toArray();
+        revenueToday = Number((revenueResult[0]?.total || 0).toFixed(2));
+      }
+
+      // 3. Occupied tables count
+      const occupiedTables = await db
+        .collection("tables")
+        .countDocuments({ status: "occupied" });
+
+      // 4. Total tables
+      const totalTables = await db.collection("tables").countDocuments();
+
+      // 5. Pending reservations today
+      const pendingReservationsToday = await db
+        .collection("reservations")
+        .countDocuments({
+          status: "pending",
+          date: new Date().toISOString().split("T")[0],
+        });
+
+      // 6. Open orders (status != closed and status != cancelled)
+      const openOrders = await db
+        .collection("orders")
+        .countDocuments({
+          status: { $nin: ["closed", "cancelled"] },
+        });
+
+      // 7. Kitchen orders (pending + preparing)
+      const kitchenOrders = await db
+        .collection("orders")
+        .countDocuments({
+          status: { $in: ["pending", "preparing"] },
+        });
+
+      const responseData = {
+        ordersToday,
+        occupiedTables,
+        totalTables,
+        pendingReservationsToday,
+        openOrders,
+        kitchenOrders,
+      };
+
+      if (isManagerOrAdmin) {
+        responseData.revenueToday = revenueToday;
+      }
+
+      res.json({ data: responseData });
+    } catch (err) {
+      console.error("Failed to generate summary:", err);
+      res.status(500).json({ error: "Failed to fetch reports summary" });
     }
   }
 );
